@@ -14,10 +14,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: strace/strace
-          # 如果你确定要 6.19，可以指定 ref，但目前建议用 master 或 v6.12
-          ref: master 
+          ref: master # 或者指定具体版本如 v6.12
 
-      - name: Set up JDK (Required for NDK tools)
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
@@ -26,43 +25,50 @@ jobs:
       - name: Install Android NDK
         uses: android-actions/setup-android@v3
 
-      - name: Install dependencies
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf automake libtool make git
+          sudo apt-get install -y autoconf automake libtool make git xz-utils
 
       - name: Build strace for ARM64
         run: |
-          # 1. 设置环境变量 (NDK 路径通常在 $ANDROID_SDK_ROOT/ndk-bundle 或通过环境变量获取)
-          # 这里我们直接寻找最新的 NDK 版本
+          # 1. 自动查找 NDK 路径
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls -1 $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
+          echo "Using NDK at: $NDK_PATH"
           
-          # 2. 配置交叉编译工具链
-          # Target 为 aarch64-linux-android，API Level 建议 21 (Android 5.0+) 或更高
+          # 2. 定义交叉编译环境变量
+          # 我们使用 API 29 (Android 10)，具有较好的现代特性支持
+          API_LEVEL=29
           export AR=$TOOLCHAIN/bin/llvm-ar
-          export CC=$TOOLCHAIN/bin/aarch64-linux-android29-clang
+          export CC=$TOOLCHAIN/bin/aarch64-linux-android$API_LEVEL-clang
           export AS=$CC
           export LD=$TOOLCHAIN/bin/ld.lld
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
 
-          # 3. 运行生成脚本
+          # 3. 解决你遇到的编译错误：禁用 -Werror
+          # 重点：strace 源码在某些 NDK 版本下会触发 nonnull 警告，必须禁用 Werror 才能继续
+          export CFLAGS="-g -O2 -Wno-error"
+          export LDFLAGS="-static"
+
+          # 4. 生成配置脚本
           ./bootstrap
 
-          # 4. Configure
-          # --host 指明运行平台，--enable-mpers=check 自动处理不同字长问题
+          # 5. 执行 Configure
+          # --enable-mpers=check 处理 32/64 位兼容性检查
           ./configure --host=aarch64-linux-android \
                       --prefix=$(pwd)/output \
                       --enable-mpers=check \
-                      LDFLAGS="-static" # 静态链接方便在不同安卓版本直接运行
+                      CFLAGS="$CFLAGS" \
+                      LDFLAGS="$LDFLAGS"
 
-          # 5. 编译
+          # 6. 编译并安装到 output 目录
           make -j$(nproc)
           make install
 
-      - name: Upload Artifact
+      - name: Upload strace Binary
         uses: actions/upload-artifact@v4
         with:
-          name: strace-android-arm64
+          name: strace-6.x-android-arm64
           path: output/bin/strace
