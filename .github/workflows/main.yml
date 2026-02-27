@@ -10,18 +10,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout strace
-        uses: actions/checkout@v4
-        with:
-          repository: strace/strace
-          path: strace
-
-      - name: Checkout libunwind
-        uses: actions/checkout@v4
-        with:
-          repository: libunwind/libunwind
-          path: libunwind
-          ref: v1.6.2
+      - name: Checkout Code
+        run: |
+          git clone --depth=1 https://github.com/strace/strace.git strace
+          git clone --depth=1 -b v1.6.2 https://github.com/libunwind/libunwind.git libunwind
 
       - name: Install Build Tools
         run: |
@@ -30,21 +22,17 @@ jobs:
 
       - name: Build Components
         run: |
-          # 1. 精确配置 NDK 路径
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls -1 $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
-          SYSROOT=$TOOLCHAIN/sysroot
-          API_LEVEL=29
-          TARGET=aarch64-linux-android
           
-          # 关键：Clang 交叉编译必须包含 --sysroot 和 --target
-          # 注意：NDK 23+ 的二进制文件名里已经包含了 target 和 api，所以直接用
-          export CC=$TOOLCHAIN/bin/${TARGET}${API_LEVEL}-clang
+          export TARGET=aarch64-linux-android
+          export API=29
+          export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
           export AR=$TOOLCHAIN/bin/llvm-ar
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           
-          # 定义全局编译参数
+          # 修复定义并强制静态
           export COMMON_FLAGS="-g -O2 -Wno-error -Din_addr_t=uint32_t"
           export LDFLAGS="-static"
           
@@ -52,33 +40,32 @@ jobs:
           mkdir -p $DEPS_DIR
 
           # ---------------------------------------------------------
-          # 2. 编译 libunwind
+          # 1. 编译 libunwind (彻底干掉外部依赖)
           # ---------------------------------------------------------
-          echo "=== Building libunwind ==="
           cd libunwind
           autoreconf -i
-          # 如果 configure 失败，cat config.log 能让我们看到具体的编译器报错
           ./configure --host=$TARGET \
                       --prefix=$DEPS_DIR \
                       --enable-static \
                       --disable-shared \
                       --disable-coredump \
                       --disable-tests \
+                      --disable-minidebuginfo \
+                      --disable-zlib-debuginfo \
+                      --disable-lzma \
                       CFLAGS="$COMMON_FLAGS" \
-                      LDFLAGS="$LDFLAGS" || (cat config.log && exit 1)
-          
+                      LDFLAGS="$LDFLAGS" || { cat config.log; exit 1; }
           make -j$(nproc)
           make install
           cd ..
 
           # ---------------------------------------------------------
-          # 3. 编译 strace
+          # 2. 编译 strace
           # ---------------------------------------------------------
-          echo "=== Building strace ==="
           cd strace
           ./bootstrap
           
-          # 注入 libunwind 变量，绕过 pkg-config 探测
+          # 这里的顺序非常重要：ptrace 必须在前面
           export libunwind_CFLAGS="-I$DEPS_DIR/include"
           export libunwind_LIBS="-L$DEPS_DIR/lib -lunwind-ptrace -lunwind-aarch64 -lunwind"
 
@@ -90,7 +77,11 @@ jobs:
                       CPPFLAGS="-I$DEPS_DIR/include -Din_addr_t=uint32_t" \
                       LDFLAGS="$LDFLAGS -L$DEPS_DIR/lib" \
                       libunwind_CFLAGS="$libunwind_CFLAGS" \
-                      libunwind_LIBS="$libunwind_LIBS" || (cat config.log && exit 1)
+                      libunwind_LIBS="$libunwind_LIBS" || { 
+                        echo "--- STRACE CONFIG.LOG TAIL ---"
+                        tail -n 300 config.log 
+                        exit 1 
+                      }
 
           make -j$(nproc)
           make install
@@ -98,5 +89,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: strace-arm64-stacktrace
+          name: strace-arm64-final
           path: strace/output/bin/strace
