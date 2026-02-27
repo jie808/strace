@@ -22,16 +22,16 @@ jobs:
         with:
           repository: libunwind/libunwind
           path: libunwind
-          ref: v1.6.2 # 使用稳定的版本
+          ref: v1.6.2
 
       - name: Install Build Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf automake libtool make git xz-utils
+          sudo apt-get install -y autoconf automake libtool make git xz-utils pkg-config
 
       - name: Build strace for Android ARM64
         run: |
-          # 1. 准备环境
+          # 1. 环境准备
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls -1 $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
           API_LEVEL=29
@@ -43,19 +43,20 @@ jobs:
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           
-          # 修正头文件类型问题
+          # 修复头文件定义与禁用警告错误
           export CPPFLAGS="-Din_addr_t=uint32_t"
           export CFLAGS="-g -O2 -Wno-error"
           
-          # 创建安装临时目录
           INSTALL_DIR=$(pwd)/deps_install
           mkdir -p $INSTALL_DIR
 
           # ---------------------------------------------------------
-          # 2. 编译 libunwind (strace 堆栈跟踪的核心依赖)
+          # 2. 编译 libunwind
           # ---------------------------------------------------------
           cd libunwind
-          ./autogen.sh
+          # 核心修复：使用 autoreconf 代替不存在的 autogen.sh
+          autoreconf -i
+          
           ./configure --host=aarch64-linux-android \
                       --prefix=$INSTALL_DIR \
                       --disable-tests \
@@ -65,17 +66,18 @@ jobs:
                       --disable-zlib-debuginfo \
                       CFLAGS="$CFLAGS" \
                       CPPFLAGS="$CPPFLAGS"
+          
           make -j$(nproc)
           make install
           cd ..
 
           # ---------------------------------------------------------
-          # 3. 编译 strace 并链接 libunwind
+          # 3. 编译 strace
           # ---------------------------------------------------------
           cd strace
           ./bootstrap
           
-          # 告诉 strace 去哪里找刚才编好的 libunwind
+          # 链接刚才编好的 libunwind
           export LDFLAGS="-L$INSTALL_DIR/lib -static"
           export CPPFLAGS="$CPPFLAGS -I$INSTALL_DIR/include"
 
@@ -90,16 +92,16 @@ jobs:
           make -j$(nproc)
           make install
           
-          # 验证是否成功支持了 unwind
-          if grep -q "unwind" config.log; then
-              echo "SUCCESS: libunwind detected!"
+          # 确认 libunwind 链接状态
+          if grep -q "HAVE_LIBUNWIND 1" config.h; then
+              echo "SUCCESS: libunwind integrated!"
           else
-              echo "ERROR: libunwind not detected! Check config.log"
+              echo "ERROR: libunwind NOT found in config.h"
               exit 1
           fi
 
-      - name: Upload strace Binary
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: strace-with-stacktrace-android
+          name: strace-arm64-with-k-option
           path: strace/output/bin/strace
