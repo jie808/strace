@@ -12,7 +12,6 @@ jobs:
     steps:
       - name: Checkout Source Code
         run: |
-          # 克隆 strace 和 libunwind
           git clone --depth=1 https://github.com/strace/strace.git strace_src
           git clone --depth=1 -b v1.6.2 https://github.com/libunwind/libunwind.git libunwind_src
 
@@ -23,7 +22,7 @@ jobs:
 
       - name: Build strace for Android ARM64
         run: |
-          # 1. 确定 NDK 工具链
+          # 1. 设置 NDK 工具链
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls -1 $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
           
@@ -34,17 +33,22 @@ jobs:
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           
-          # 定义通用编译参数
-          export COMMON_FLAGS="-g -O2 -Wno-error -Din_addr_t=uint32_t"
+          # 2. 定位 NDK 内部的静态 libz.a (这是解决 uncompress 的核心)
+          # NDK 的 sysroot 下有针对不同架构的库文件
+          LIBZ_PATH=$TOOLCHAIN/sysroot/usr/lib/$TARGET/$API/libz.a
+          if [ ! -f "$LIBZ_PATH" ]; then
+            # 兼容性路径查找
+            LIBZ_PATH=$TOOLCHAIN/sysroot/usr/lib/$TARGET/libz.a
+          fi
+          echo "Found libz.a at: $LIBZ_PATH"
           
-          # 依赖安装的绝对路径
+          export COMMON_FLAGS="-g -O2 -Wno-error -Din_addr_t=uint32_t"
           DEPS_DIR=$(pwd)/deps_install
           mkdir -p $DEPS_DIR
 
           # ---------------------------------------------------------
-          # 2. 编译 libunwind (禁用外部依赖，但 zlib 稍后在链接时补上)
+          # 3. 编译 libunwind
           # ---------------------------------------------------------
-          echo ">>> Building libunwind..."
           cd libunwind_src
           autoreconf -i
           ./configure --host=$TARGET \
@@ -62,18 +66,16 @@ jobs:
           cd ..
 
           # ---------------------------------------------------------
-          # 3. 编译 strace (集成堆栈回溯并修复 zlib 链接)
+          # 4. 编译 strace (手动强行链接 libz.a)
           # ---------------------------------------------------------
-          echo ">>> Building strace..."
           cd strace_src
           ./bootstrap
           
-          # 重点修复：在链接最后加上 -lz (解决 uncompress 符号问题)
-          # 按照链接规则：libunwind 依赖 zlib，所以 -lz 必须放在最后
-          UNWIND_LIBS="-L$DEPS_DIR/lib -lunwind-ptrace -lunwind-aarch64 -lunwind -lz"
+          # 在 LIBS 环境变量中直接填入 libz.a 的绝对路径，防止 ld.lld 漏掉
+          # 顺序：ptrace -> generic -> unwind -> z
+          UNWIND_LIBS="-L$DEPS_DIR/lib -lunwind-ptrace -lunwind-aarch64 -lunwind $LIBZ_PATH"
           UNWIND_CFLAGS="-I$DEPS_DIR/include"
 
-          # 注入缓存变量跳过检测，并强制覆盖链接库
           ./configure --host=$TARGET \
                       --prefix=$(pwd)/output \
                       --enable-mpers=check \
@@ -85,15 +87,15 @@ jobs:
                       CPPFLAGS="-I$DEPS_DIR/include -Din_addr_t=uint32_t" \
                       LDFLAGS="-static -L$DEPS_DIR/lib" || { cat config.log; exit 1; }
 
-          make -j$(nproc)
+          # 这里的 LIBS 赋值是为了确保最终链接 strace 时能带上 zlib
+          make -j$(nproc) LIBS="$UNWIND_LIBS"
           make install
           
-          # 最终校验
-          echo ">>> Verifying binary symbols..."
-          $TOOLCHAIN/bin/llvm-nm src/strace | grep -iE "unwind|uncompress" | head -n 10
+          echo ">>> Final Check for symbols:"
+          $TOOLCHAIN/bin/llvm-nm src/strace | grep -E "unwind|uncompress" | head -n 10
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: strace-android-arm64-k-option
+          name: strace-android-arm64-fixed
           path: strace_src/output/bin/strace
