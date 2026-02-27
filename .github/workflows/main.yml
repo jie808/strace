@@ -1,26 +1,4 @@
-name: Build strace with Stack Trace (ARM64)
-
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Code
-        run: |
-          git clone --depth=1 https://github.com/strace/strace.git strace
-          git clone --depth=1 -b v1.6.2 https://github.com/libunwind/libunwind.git libunwind
-
-      - name: Install Build Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y autoconf automake libtool make git xz-utils pkg-config
-
-      - name: Build Components
+- name: Build Components
         run: |
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls -1 $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
@@ -37,7 +15,7 @@ jobs:
           mkdir -p $DEPS_DIR
 
           # ---------------------------------------------------------
-          # 1. 编译 libunwind (保持极简)
+          # 1. 编译 libunwind
           # ---------------------------------------------------------
           cd libunwind
           autoreconf -i
@@ -48,7 +26,6 @@ jobs:
                       --disable-coredump \
                       --disable-tests \
                       --disable-minidebuginfo \
-                      --disable-lzma \
                       CFLAGS="$COMMON_FLAGS" \
                       LDFLAGS="-static"
           make -j$(nproc)
@@ -56,16 +33,15 @@ jobs:
           cd ..
 
           # ---------------------------------------------------------
-          # 2. 编译 strace (强行越过检测)
+          # 2. 编译 strace (增加 -lz 解决 uncompress 符号问题)
           # ---------------------------------------------------------
           cd strace
           ./bootstrap
           
-          # 定义 libunwind 标志
-          UNWIND_LIBS="-L$DEPS_DIR/lib -lunwind-ptrace -lunwind-aarch64 -lunwind"
+          # 重点：在 LIBS 中加入 -lz
+          UNWIND_LIBS="-L$DEPS_DIR/lib -lunwind-ptrace -lunwind-aarch64 -lunwind -lz"
           UNWIND_CFLAGS="-I$DEPS_DIR/include"
 
-          # 核心技巧：通过 ac_cv_lib_...=yes 强制让 configure 认为测试通过
           ./configure --host=$TARGET \
                       --prefix=$(pwd)/output \
                       --enable-mpers=check \
@@ -75,17 +51,7 @@ jobs:
                       libunwind_LIBS="$UNWIND_LIBS" \
                       CFLAGS="$COMMON_FLAGS" \
                       CPPFLAGS="-I$DEPS_DIR/include -Din_addr_t=uint32_t" \
-                      LDFLAGS="-static -L$DEPS_DIR/lib" || {
-                        echo "FAILED! Printing last 50 lines of config.log:"
-                        tail -n 50 config.log
-                        exit 1
-                      }
+                      LDFLAGS="-static -L$DEPS_DIR/lib"
 
           make -j$(nproc)
           make install
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: strace-arm64-stacktrace-success
-          path: strace/output/bin/strace
