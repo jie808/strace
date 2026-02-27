@@ -51,17 +51,18 @@ jobs:
           mkdir -p $INSTALL_DIR
 
           # ---------------------------------------------------------
-          # 2. 编译 libunwind
+          # 2. 编译 libunwind (禁用 coredump 避免报错)
           # ---------------------------------------------------------
           cd libunwind
-          # 核心修复：使用 autoreconf 代替不存在的 autogen.sh
           autoreconf -i
           
+          # 重点：添加 --disable-coredump
           ./configure --host=aarch64-linux-android \
                       --prefix=$INSTALL_DIR \
                       --disable-tests \
                       --enable-static \
                       --disable-shared \
+                      --disable-coredump \
                       --disable-minidebuginfo \
                       --disable-zlib-debuginfo \
                       CFLAGS="$CFLAGS" \
@@ -77,7 +78,7 @@ jobs:
           cd strace
           ./bootstrap
           
-          # 链接刚才编好的 libunwind
+          # 链接 libunwind
           export LDFLAGS="-L$INSTALL_DIR/lib -static"
           export CPPFLAGS="$CPPFLAGS -I$INSTALL_DIR/include"
 
@@ -92,8 +93,8 @@ jobs:
           make -j$(nproc)
           make install
           
-          # 确认 libunwind 链接状态
-          if grep -q "HAVE_LIBUNWIND 1" config.h; then
+          # 验证是否包含堆栈跟踪支持
+          if grep -q "HAVE_LIBUNWIND 1" src/config.h; then
               echo "SUCCESS: libunwind integrated!"
           else
               echo "ERROR: libunwind NOT found in config.h"
@@ -103,5 +104,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: strace-arm64-with-k-option
+          name: strace-arm64-stacktrace
           path: strace/output/bin/strace
