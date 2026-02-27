@@ -43,20 +43,15 @@ jobs:
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           
-          # 修复头文件定义与禁用警告错误
-          export CPPFLAGS="-Din_addr_t=uint32_t"
-          export CFLAGS="-g -O2 -Wno-error"
-          
           INSTALL_DIR=$(pwd)/deps_install
           mkdir -p $INSTALL_DIR
 
           # ---------------------------------------------------------
-          # 2. 编译 libunwind (禁用 coredump 避免报错)
+          # 2. 编译 libunwind
           # ---------------------------------------------------------
           cd libunwind
           autoreconf -i
           
-          # 重点：添加 --disable-coredump
           ./configure --host=aarch64-linux-android \
                       --prefix=$INSTALL_DIR \
                       --disable-tests \
@@ -65,8 +60,8 @@ jobs:
                       --disable-coredump \
                       --disable-minidebuginfo \
                       --disable-zlib-debuginfo \
-                      CFLAGS="$CFLAGS" \
-                      CPPFLAGS="$CPPFLAGS"
+                      CFLAGS="-g -O2 -Wno-error" \
+                      CPPFLAGS="-Din_addr_t=uint32_t"
           
           make -j$(nproc)
           make install
@@ -78,26 +73,32 @@ jobs:
           cd strace
           ./bootstrap
           
-          # 链接 libunwind
+          # 核心修复点：
+          # 1. 设置 PKG_CONFIG_PATH 让 configure 自动发现 libunwind
+          # 2. 手动补充 LIBS 确保探测函数时链接成功
+          # 3. 强制使用静态链接路径
+          export PKG_CONFIG_PATH=$INSTALL_DIR/lib/pkgconfig
+          export CPPFLAGS="-I$INSTALL_DIR/include -Din_addr_t=uint32_t"
           export LDFLAGS="-L$INSTALL_DIR/lib -static"
-          export CPPFLAGS="$CPPFLAGS -I$INSTALL_DIR/include"
+          export LIBS="-lunwind-ptrace -lunwind -lunwind-aarch64"
 
           ./configure --host=aarch64-linux-android \
                       --prefix=$(pwd)/output \
                       --enable-mpers=check \
                       --with-libunwind \
-                      CFLAGS="$CFLAGS" \
+                      CFLAGS="-g -O2 -Wno-error" \
                       CPPFLAGS="$CPPFLAGS" \
-                      LDFLAGS="$LDFLAGS"
+                      LDFLAGS="$LDFLAGS" \
+                      LIBS="$LIBS"
 
           make -j$(nproc)
           make install
           
-          # 验证是否包含堆栈跟踪支持
+          # 确认二进制文件是否成功集成
           if grep -q "HAVE_LIBUNWIND 1" src/config.h; then
               echo "SUCCESS: libunwind integrated!"
           else
-              echo "ERROR: libunwind NOT found in config.h"
+              echo "ERROR: libunwind NOT found in config.h. Build failed to enable stack trace."
               exit 1
           fi
 
