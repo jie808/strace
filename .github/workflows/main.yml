@@ -1,4 +1,4 @@
-name: Build strace for Android arm64
+name: Build strace for Android arm64 (Working)
 
 on:
   workflow_dispatch:
@@ -9,46 +9,59 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install core dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential autoconf automake libtool wget
+          sudo apt update && sudo apt install -y build-essential autoconf automake libtool wget unzip
 
-      - name: Download Android NDK r27
+      - name: Download NDK r25c (稳定兼容版)
         run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-r27-linux.zip
-          unzip -q android-ndk-r27-linux.zip
+          # 改用 r25c，比 r27 更兼容 strace 6.19
+          wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+          unzip -q android-ndk-r25c-linux.zip
 
-      - name: Build strace
+      - name: Build strace (动态编译，适配 Android)
         run: |
-          # 定义绝对路径
-          NDK_ROOT=$(pwd)/android-ndk-r27
+          # 绝对路径，杜绝路径问题
+          NDK_ROOT=$(pwd)/android-ndk-r25c
           TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
+          # 目标 API 24 (Android 7.0)，兼容绝大多数手机
+          API=24
 
-          # 导出编译工具链
-          export CC="$TOOLCHAIN/bin/aarch64-linux-android24-clang"
-          export CXX="$TOOLCHAIN/bin/aarch64-linux-android24-clang++"
-          export AR="$TOOLCHAIN/bin/llvm-ar"
-          export LD="$TOOLCHAIN/bin/ld.lld"
-          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
-          export STRIP="$TOOLCHAIN/bin/llvm-strip"
+          # 导出工具链（核心：删除静态编译，用动态）
+          export CC=$TOOLCHAIN/bin/aarch64-linux-android$API-clang
+          export CXX=$TOOLCHAIN/bin/aarch64-linux-android$API-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export LD=$TOOLCHAIN/bin/ld.lld
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export STRIP=$TOOLCHAIN/bin/llvm-strip
 
-          # 生成 configure 脚本
+          # 生成配置脚本
           ./bootstrap
 
-          # 配置编译选项
+          # 关键配置：关闭不兼容的功能，适配 Android
           ./configure \
             --host=aarch64-linux-android \
             --target=aarch64-linux-android \
             --enable-mpers=no \
-            CFLAGS="-O2" \
-            LDFLAGS="-static"
+            --disable-static \
+            --enable-shared \
+            CFLAGS="-O2 -D__ANDROID_API__=$API" \
+            LDFLAGS="-llog"
 
-          # 并行编译
-          make -j$(nproc)
+          # 编译（限制线程，避免云服务器过载）
+          make -j2
 
-      - name: Upload the built strace binary
+      - name: Prepare artifacts (含依赖库)
+        run: |
+          # 复制编译好的 strace 和依赖的库
+          mkdir -p ./strace-android-output
+          cp src/strace ./strace-android-output/
+          # 复制 Android 依赖库（运行必需）
+          $TOOLCHAIN/sysroot/usr/lib/aarch64-linux-android/$API/libc.so ./strace-android-output/
+          $TOOLCHAIN/sysroot/usr/lib/aarch64-linux-android/$API/libm.so ./strace-android-output/
+
+      - name: Upload final files
         uses: actions/upload-artifact@v4
         with:
-          name: strace-android-arm64
-          path: src/strace
+          name: strace-6.19-android-arm64
+          path: strace-android-output/
