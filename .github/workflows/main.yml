@@ -1,4 +1,4 @@
-name: Build strace for Android ARM64
+name: Build strace with Stack Trace (ARM64)
 
 on:
   push:
@@ -10,65 +10,96 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout strace source
+      - name: Checkout strace
         uses: actions/checkout@v4
         with:
           repository: strace/strace
+          path: strace
           ref: master
 
-      - name: Set up JDK
-        uses: actions/setup-java@v4
+      - name: Checkout libunwind
+        uses: actions/checkout@v4
         with:
-          distribution: 'zulu'
-          java-version: '17'
+          repository: libunwind/libunwind
+          path: libunwind
+          ref: v1.6.2 # 使用稳定的版本
 
-      - name: Install Android NDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Build Dependencies
+      - name: Install Build Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y autoconf automake libtool make git xz-utils
 
-      - name: Build strace for ARM64
+      - name: Build strace for Android ARM64
         run: |
-          # 1. 定位 NDK 和工具链
+          # 1. 准备环境
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls -1 $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
-          
-          # 2. 设置交叉编译工具
           API_LEVEL=29
+          
           export AR=$TOOLCHAIN/bin/llvm-ar
           export CC=$TOOLCHAIN/bin/aarch64-linux-android$API_LEVEL-clang
           export AS=$CC
           export LD=$TOOLCHAIN/bin/ld.lld
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
-
-          # 3. 关键修复：定义 missing 类型并禁用警告错误
-          # -Din_addr_t=uint32_t 解决 arpa/inet.h 的报错
-          # -Wno-error 解决之前的 null 传递报错
+          
+          # 修正头文件类型问题
           export CPPFLAGS="-Din_addr_t=uint32_t"
           export CFLAGS="-g -O2 -Wno-error"
-          export LDFLAGS="-static"
+          
+          # 创建安装临时目录
+          INSTALL_DIR=$(pwd)/deps_install
+          mkdir -p $INSTALL_DIR
 
-          # 4. 生成配置
+          # ---------------------------------------------------------
+          # 2. 编译 libunwind (strace 堆栈跟踪的核心依赖)
+          # ---------------------------------------------------------
+          cd libunwind
+          ./autogen.sh
+          ./configure --host=aarch64-linux-android \
+                      --prefix=$INSTALL_DIR \
+                      --disable-tests \
+                      --enable-static \
+                      --disable-shared \
+                      --disable-minidebuginfo \
+                      --disable-zlib-debuginfo \
+                      CFLAGS="$CFLAGS" \
+                      CPPFLAGS="$CPPFLAGS"
+          make -j$(nproc)
+          make install
+          cd ..
+
+          # ---------------------------------------------------------
+          # 3. 编译 strace 并链接 libunwind
+          # ---------------------------------------------------------
+          cd strace
           ./bootstrap
+          
+          # 告诉 strace 去哪里找刚才编好的 libunwind
+          export LDFLAGS="-L$INSTALL_DIR/lib -static"
+          export CPPFLAGS="$CPPFLAGS -I$INSTALL_DIR/include"
 
-          # 5. 配置
           ./configure --host=aarch64-linux-android \
                       --prefix=$(pwd)/output \
                       --enable-mpers=check \
-                      CPPFLAGS="$CPPFLAGS" \
+                      --with-libunwind \
                       CFLAGS="$CFLAGS" \
+                      CPPFLAGS="$CPPFLAGS" \
                       LDFLAGS="$LDFLAGS"
 
-          # 6. 编译
           make -j$(nproc)
           make install
+          
+          # 验证是否成功支持了 unwind
+          if grep -q "unwind" config.log; then
+              echo "SUCCESS: libunwind detected!"
+          else
+              echo "ERROR: libunwind not detected! Check config.log"
+              exit 1
+          fi
 
       - name: Upload strace Binary
         uses: actions/upload-artifact@v4
         with:
-          name: strace-android-arm64
-          path: output/bin/strace
+          name: strace-with-stacktrace-android
+          path: strace/output/bin/strace
