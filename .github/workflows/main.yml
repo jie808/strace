@@ -9,30 +9,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tools
-        run: sudo apt update && sudo apt install -y build-essential autoconf automake libtool wget
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake libtool wget
 
-      - name: Download NDK
+      - name: Download Android NDK r27
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r27-linux.zip
           unzip -q android-ndk-r27-linux.zip
 
-      - name: Build
+      - name: Build strace
         run: |
-          NDK=android-ndk-r27
-          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export CC=$TOOLCHAIN/bin/aarch64-linux-android24-clang
-          export CXX=$TOOLCHAIN/bin/aarch64-linux-android24-clang++
-          export AR=$TOOLCHAIN/bin/llvm-ar
-          export LD=$TOOLCHAIN/bin/ld
-          export STRIP=$TOOLCHAIN/bin/llvm-strip
+          # 定义绝对路径
+          NDK_ROOT=$(pwd)/android-ndk-r27
+          TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
 
+          # 导出编译工具链
+          export CC="$TOOLCHAIN/bin/aarch64-linux-android24-clang"
+          export CXX="$TOOLCHAIN/bin/aarch64-linux-android24-clang++"
+          export AR="$TOOLCHAIN/bin/llvm-ar"
+          export LD="$TOOLCHAIN/bin/ld.lld"
+          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+          export STRIP="$TOOLCHAIN/bin/llvm-strip"
+
+          # 生成 configure 脚本
           ./bootstrap
-          ./configure --host=aarch64-linux-android --enable-mpers=no
-          make -j4
 
-      - name: Upload
+          # 配置编译选项
+          ./configure \
+            --host=aarch64-linux-android \
+            --target=aarch64-linux-android \
+            --enable-mpers=no \
+            CFLAGS="-O2" \
+            LDFLAGS="-static"
+
+          # 并行编译
+          make -j$(nproc)
+
+      - name: Upload the built strace binary
         uses: actions/upload-artifact@v4
         with:
-          name: strace-arm64
+          name: strace-android-arm64
           path: src/strace
