@@ -1,5 +1,29 @@
-- name: Build Components
+name: Build strace with Stack Trace (ARM64)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
         run: |
+          # 建议使用稳定分支，master 可能存在代码变动
+          git clone --depth=1 https://github.com/strace/strace.git strace
+          git clone --depth=1 -b v1.6.2 https://github.com/libunwind/libunwind.git libunwind
+
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool make git xz-utils pkg-config
+
+      - name: Build strace for Android ARM64
+        run: |
+          # 1. 确定 NDK 路径与工具链
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls -1 $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
           
@@ -10,13 +34,17 @@
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           
+          # 通用编译标志
           export COMMON_FLAGS="-g -O2 -Wno-error -Din_addr_t=uint32_t"
+          
+          # 安装依赖的临时绝对路径
           DEPS_DIR=$(pwd)/deps_install
           mkdir -p $DEPS_DIR
 
           # ---------------------------------------------------------
-          # 1. 编译 libunwind
+          # 2. 编译 libunwind (解决符号缺失的关键配置)
           # ---------------------------------------------------------
+          echo ">>> Building libunwind..."
           cd libunwind
           autoreconf -i
           ./configure --host=$TARGET \
@@ -26,6 +54,7 @@
                       --disable-coredump \
                       --disable-tests \
                       --disable-minidebuginfo \
+                      --disable-lzma \
                       CFLAGS="$COMMON_FLAGS" \
                       LDFLAGS="-static"
           make -j$(nproc)
@@ -33,12 +62,14 @@
           cd ..
 
           # ---------------------------------------------------------
-          # 2. 编译 strace (增加 -lz 解决 uncompress 符号问题)
+          # 3. 编译 strace (集成堆栈回溯)
           # ---------------------------------------------------------
+          echo ">>> Building strace..."
           cd strace
           ./bootstrap
           
-          # 重点：在 LIBS 中加入 -lz
+          # 重点：在这里加入 -lz 解决你遇到的 uncompress 报错
+          # 同时加入 -lc++ 以防万一
           UNWIND_LIBS="-L$DEPS_DIR/lib -lunwind-ptrace -lunwind-aarch64 -lunwind -lz"
           UNWIND_CFLAGS="-I$DEPS_DIR/include"
 
@@ -51,7 +82,17 @@
                       libunwind_LIBS="$UNWIND_LIBS" \
                       CFLAGS="$COMMON_FLAGS" \
                       CPPFLAGS="-I$DEPS_DIR/include -Din_addr_t=uint32_t" \
-                      LDFLAGS="-static -L$DEPS_DIR/lib"
+                      LDFLAGS="-static -L$DEPS_DIR/lib" || { cat config.log; exit 1; }
 
           make -j$(nproc)
           make install
+          
+          # 验证二进制文件中是否包含 unwind 符号
+          echo ">>> Verifying build..."
+          $TOOLCHAIN/bin/llvm-nm src/strace | grep -i "unwind" | head -n 10 || echo "Warning: No unwind symbols found!"
+
+      - name: Upload strace Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: strace-android-arm64-with-stacktrace
+          path: strace/output/bin/strace
