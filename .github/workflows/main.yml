@@ -15,7 +15,6 @@ jobs:
         with:
           repository: strace/strace
           path: strace
-          ref: master
 
       - name: Checkout libunwind
         uses: actions/checkout@v4
@@ -31,43 +30,43 @@ jobs:
 
       - name: Build Components
         run: |
-          # 1. 设置 NDK 工具链环境变量
+          # 1. 精确配置 NDK 路径
           NDK_PATH=$ANDROID_SDK_ROOT/ndk/$(ls -1 $ANDROID_SDK_ROOT/ndk | sort -V | tail -n 1)
           TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
+          SYSROOT=$TOOLCHAIN/sysroot
           API_LEVEL=29
+          TARGET=aarch64-linux-android
           
+          # 关键：Clang 交叉编译必须包含 --sysroot 和 --target
+          # 注意：NDK 23+ 的二进制文件名里已经包含了 target 和 api，所以直接用
+          export CC=$TOOLCHAIN/bin/${TARGET}${API_LEVEL}-clang
           export AR=$TOOLCHAIN/bin/llvm-ar
-          export CC=$TOOLCHAIN/bin/aarch64-linux-android$API_LEVEL-clang
-          export AS=$CC
-          export LD=$TOOLCHAIN/bin/ld.lld
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
-          export OBJCOPY=$TOOLCHAIN/bin/llvm-objcopy
           
-          # 统一编译参数
-          export COMMON_FLAGS="-g -O2 -Wno-error - Din_addr_t=uint32_t"
+          # 定义全局编译参数
+          export COMMON_FLAGS="-g -O2 -Wno-error -Din_addr_t=uint32_t"
+          export LDFLAGS="-static"
           
-          # 定义依赖安装临时目录 (必须是绝对路径)
           DEPS_DIR=$(pwd)/deps_install
           mkdir -p $DEPS_DIR
 
           # ---------------------------------------------------------
-          # 2. 编译 libunwind (关键：禁用一切不必要的模块)
+          # 2. 编译 libunwind
           # ---------------------------------------------------------
           echo "=== Building libunwind ==="
           cd libunwind
           autoreconf -i
-          ./configure --host=aarch64-linux-android \
+          # 如果 configure 失败，cat config.log 能让我们看到具体的编译器报错
+          ./configure --host=$TARGET \
                       --prefix=$DEPS_DIR \
                       --enable-static \
                       --disable-shared \
                       --disable-coredump \
                       --disable-tests \
-                      --disable-documentation \
-                      --disable-minidebuginfo \
-                      --disable-zlib-debuginfo \
                       CFLAGS="$COMMON_FLAGS" \
-                      CPPFLAGS="$COMMON_FLAGS"
+                      LDFLAGS="$LDFLAGS" || (cat config.log && exit 1)
+          
           make -j$(nproc)
           make install
           cd ..
@@ -79,37 +78,25 @@ jobs:
           cd strace
           ./bootstrap
           
-          # 强制通过环境变量注入 libunwind 的路径和库名
-          # 在 Android 上，libunwind 往往需要链接 unwind-aarch64 和 unwind-ptrace
+          # 注入 libunwind 变量，绕过 pkg-config 探测
           export libunwind_CFLAGS="-I$DEPS_DIR/include"
           export libunwind_LIBS="-L$DEPS_DIR/lib -lunwind-ptrace -lunwind-aarch64 -lunwind"
-          
-          # 显式告知 configure 搜索路径
-          export LDFLAGS="-static -L$DEPS_DIR/lib"
-          export CPPFLAGS="-I$DEPS_DIR/include -Din_addr_t=uint32_t"
 
-          ./configure --host=aarch64-linux-android \
+          ./configure --host=$TARGET \
                       --prefix=$(pwd)/output \
                       --enable-mpers=check \
                       --with-libunwind \
-                      libunwind_CFLAGS="$libunwind_CFLAGS" \
-                      libunwind_LIBS="$libunwind_LIBS" \
                       CFLAGS="$COMMON_FLAGS" \
-                      CPPFLAGS="$CPPFLAGS" \
-                      LDFLAGS="$LDFLAGS"
+                      CPPFLAGS="-I$DEPS_DIR/include -Din_addr_t=uint32_t" \
+                      LDFLAGS="$LDFLAGS -L$DEPS_DIR/lib" \
+                      libunwind_CFLAGS="$libunwind_CFLAGS" \
+                      libunwind_LIBS="$libunwind_LIBS" || (cat config.log && exit 1)
 
           make -j$(nproc)
           make install
-          
-          # 验证二进制
-          if [ -f "src/strace" ]; then
-            echo "Binary generated successfully."
-            # 检查宏定义是否包含 UNWIND
-            grep "HAVE_LIBUNWIND" src/config.h || echo "Warning: HAVE_LIBUNWIND not found in config.h"
-          fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: strace-android-k-option
+          name: strace-arm64-stacktrace
           path: strace/output/bin/strace
